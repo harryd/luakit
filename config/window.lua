@@ -148,6 +148,12 @@ window.init_funcs = {
         end)
     end,
 
+    fifo_data = function (w)
+        w.win:add_signal("fifo", function (win, url)
+            w:new_tab(url, true)          
+        end)
+    end,
+
     last_win_check = function (w)
         w.win:add_signal("destroy", function ()
             -- call the quit function if this was the last window left

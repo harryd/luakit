@@ -21,16 +21,43 @@
 #include "globalconf.h"
 #include "common/util.h"
 #include "luah.h"
+#include "widgets/common.h"
 
 #include <gtk/gtk.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
 #include <locale.h>
+#include <glib.h>
+#include <fcntl.h>
 
 static void sigchld(int sigint);
+gboolean read_url(GIOChannel *source, GIOCondition condition, gpointer data);
+int setup_fifo(gchar *fifo_name);
+
+gboolean 
+read_url(GIOChannel *source, GIOCondition condition, gpointer data){
+    (void) condition;
+    (void) data;
+    gchar *url;
+    g_io_channel_read_line(source, &url, NULL, NULL, NULL);
+    lua_State *L = globalconf.L;
+    widget_t *w = g_ptr_array_index(globalconf.windows, 0); 
+    luaH_object_push(L, w->ref);
+    lua_pushstring(L, url);
+    luaH_object_emit_signal(L, -2, "fifo", 1, 0);
+    lua_pop(L, 1);
+    return TRUE;
+}
+
+int
+setup_fifo(gchar *fifo_name){
+    mkfifo(fifo_name, S_IRWXU);
+    return open(fifo_name, O_NONBLOCK | O_RDWR);
+}
 
 void
 sigchld(int signum) {
@@ -74,7 +101,7 @@ init_directories(void)
 
 /* load command line options into luakit and return uris to load */
 gchar**
-parseopts(int argc, gchar *argv[], gboolean **nonblock) {
+parseopts(int argc, gchar *argv[], gboolean **nonblock, gboolean **open_tabs) {
     GOptionContext *context;
     gboolean *version_only = NULL;
     gboolean *check_only = NULL;
@@ -91,6 +118,7 @@ parseopts(int argc, gchar *argv[], gboolean **nonblock) {
       { "version", 'V', 0, G_OPTION_ARG_NONE,         &version_only,         "print version and exit",    NULL   },
       { "check",   'k', 0, G_OPTION_ARG_NONE,         &check_only,           "check config and exit",     NULL   },
       { "nonblock",'n', 0, G_OPTION_ARG_NONE,         nonblock,              "run in background",         NULL   },
+      { "tabs",    't', 0, G_OPTION_ARG_NONE,         open_tabs,             "open uris in new tabs",     NULL   },
       { NULL,      0,   0, 0,                         NULL,                  NULL,                        NULL   },
     };
 
@@ -134,9 +162,12 @@ parseopts(int argc, gchar *argv[], gboolean **nonblock) {
 gint
 main(gint argc, gchar *argv[]) {
     gboolean *nonblock = NULL;
+    gboolean *open_tabs = NULL;
     gchar **uris = NULL;
+    gchar *fifo_name, *uri, buf[256];
+    int fd, strlen;
     pid_t pid, sid;
-
+    GIOChannel *ioc;
     /* clean up any zombies */
     struct sigaction sigact;
     sigact.sa_handler=sigchld;
@@ -152,8 +183,7 @@ main(gint argc, gchar *argv[]) {
     setlocale(LC_NUMERIC, "C");
 
     /* parse command line opts and get uris to load */
-    uris = parseopts(argc, argv, &nonblock);
-
+    uris = parseopts(argc, argv, &nonblock, &open_tabs);
     /* if non block mode - respawn, detach and continue in child */
     if (nonblock) {
         pid = fork();
@@ -167,7 +197,21 @@ main(gint argc, gchar *argv[]) {
             fatal("New SID creation failure: %d", errno);
         }
     }
+    fifo_name = g_strdup_printf("/tmp/luakit-%d", getuid());
+    fd = setup_fifo(fifo_name);
+    if (open_tabs){
+        for (gint i = 0; uris && (uri = uris[i]); i++) {
+            strlen = g_sprintf(buf, "%s\n", uri);
+            g_printf("%s", buf);
+            write(fd, buf, strlen);
+        }
+        exit(EXIT_SUCCESS);
+    }
+ 
+        
 
+    ioc = g_io_channel_unix_new(fd);
+    g_io_add_watch(ioc, G_IO_IN, read_url, NULL);
     gtk_init(&argc, &argv);
     if (!g_thread_supported())
         g_thread_init(NULL);
@@ -183,7 +227,9 @@ main(gint argc, gchar *argv[]) {
         fatal("no windows spawned by rc file, exiting");
 
     gtk_main();
+    unlink(fifo_name);
     return EXIT_SUCCESS;
 }
 
 // vim: ft=c:et:sw=4:ts=8:sts=4:tw=80
+
